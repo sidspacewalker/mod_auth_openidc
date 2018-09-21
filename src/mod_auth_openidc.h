@@ -518,6 +518,7 @@ apr_byte_t oidc_oauth_get_bearer_token(request_rec *r, const char **access_token
 #define OIDC_CLAIM_RFP             "rfp"
 #define OIDC_CLAIM_TARGET_LINK_URI "target_link_uri"
 #define OIDC_CLAIM_SID             "sid"
+#define OIDC_CLAIM_EVENTS          "events"
 
 #define OIDC_JWK_X5T       "x5t"
 #define OIDC_JWK_KEYS      "keys"

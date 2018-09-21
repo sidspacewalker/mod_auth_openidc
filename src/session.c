@@ -322,8 +322,7 @@ apr_byte_t oidc_session_load(request_rec *r, oidc_session_t **zz) {
 
 			oidc_session_get(r, z, OIDC_SESSION_REMOTE_USER_KEY,
 					&z->remote_user);
-			oidc_session_get(r, z, OIDC_SESSION_SID_KEY,
-					&z->sid);
+			oidc_session_get(r, z, OIDC_SESSION_SID_KEY, &z->sid);
 
 		}
 	}

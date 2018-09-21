@@ -1782,7 +1782,8 @@ static apr_byte_t oidc_save_in_session(request_rec *r, oidc_cfg *c,
 
 	char *sid = NULL;
 	if (provider->end_session_endpoint != NULL) {
-		oidc_jose_get_string(r->pool, id_token_jwt->payload.value.json, OIDC_CLAIM_SID, FALSE, &sid, NULL);
+		oidc_jose_get_string(r->pool, id_token_jwt->payload.value.json,
+				OIDC_CLAIM_SID, FALSE, &sid, NULL);
 		if (sid != NULL)
 			session->sid = apr_pstrdup(r->pool, sid);
 		else
@@ -2576,9 +2577,8 @@ static apr_byte_t oidc_is_front_channel_logout(const char *logout_param_value) {
 }
 
 static apr_byte_t oidc_is_back_channel_logout(const char *logout_param_value) {
-	return ((logout_param_value != NULL)
-			&& (apr_strnatcmp(logout_param_value,
-					OIDC_BACKCHANNEL_STYLE_LOGOUT_PARAM_VALUE) == 0));
+	return ((logout_param_value != NULL) && (apr_strnatcmp(logout_param_value,
+			OIDC_BACKCHANNEL_STYLE_LOGOUT_PARAM_VALUE) == 0));
 }
 
 /*
@@ -2636,6 +2636,8 @@ static int oidc_handle_logout_request(request_rec *r, oidc_cfg *c,
 /*
  * handle a backchannel logout
  */
+#define OIDC_EVENTS_BLOGOUT_KEY "http://schemas.openid.net/event/backchannel-logout"
+
 static int oidc_handle_logout_backchannel(request_rec *r, oidc_cfg *cfg) {
 
 	oidc_debug(r, "enter");
@@ -2651,13 +2653,16 @@ static int oidc_handle_logout_backchannel(request_rec *r, oidc_cfg *cfg) {
 
 	apr_table_t *params = apr_table_make(r->pool, 8);
 	if (oidc_util_read_post_params(r, params) == FALSE) {
-		oidc_error(r, "could not read POST-ed parameters to the logout endpoint");
+		oidc_error(r,
+				"could not read POST-ed parameters to the logout endpoint");
 		goto out;
 	}
 
 	logout_token = apr_table_get(params, OIDC_PROTO_LOGOUT_TOKEN);
 	if (logout_token == NULL) {
-		oidc_error(r, "backchannel lggout endpoint was called but could not find a parameter named \"%s\"", OIDC_PROTO_LOGOUT_TOKEN);
+		oidc_error(r,
+				"backchannel lggout endpoint was called but could not find a parameter named \"%s\"",
+				OIDC_PROTO_LOGOUT_TOKEN);
 		goto out;
 	}
 
@@ -2671,8 +2676,7 @@ static int oidc_handle_logout_backchannel(request_rec *r, oidc_cfg *cfg) {
 		goto out;
 	}
 
-	provider = oidc_get_provider_for_issuer(r, cfg,
-			jwt->payload.iss, FALSE);
+	provider = oidc_get_provider_for_issuer(r, cfg, jwt->payload.iss, FALSE);
 	if (provider == NULL) {
 		oidc_error(r, "no provider found for issuer: %s", jwt->payload.iss);
 		goto out;
@@ -2690,8 +2694,7 @@ static int oidc_handle_logout_backchannel(request_rec *r, oidc_cfg *cfg) {
 	if (oidc_proto_jwt_verify(r, cfg, jwt, &jwks_uri,
 			oidc_util_merge_symmetric_key(r->pool, NULL, jwk)) == FALSE) {
 
-		oidc_error(r,
-				"id_token signature could not be validated, aborting");
+		oidc_error(r, "id_token signature could not be validated, aborting");
 		goto out;
 	}
 
@@ -2707,6 +2710,55 @@ static int oidc_handle_logout_backchannel(request_rec *r, oidc_cfg *cfg) {
 			&jwt->payload) == FALSE)
 		goto out;
 
+	json_t *events = json_object_get(jwt->payload.value.json,
+			OIDC_CLAIM_EVENTS);
+	if (events == NULL) {
+		oidc_error(r, "\"%s\" claim could not be found in logout token",
+				OIDC_CLAIM_EVENTS);
+		goto out;
+	}
+
+	json_t *blogout = json_object_get(events, OIDC_EVENTS_BLOGOUT_KEY);
+	if (!json_is_object(blogout)) {
+		oidc_error(r, "\"%s\" object could not be found in \"%s\" claim",
+				OIDC_EVENTS_BLOGOUT_KEY, OIDC_CLAIM_EVENTS);
+		goto out;
+	}
+
+	char *nonce = NULL;
+	oidc_json_object_get_string(r->pool, jwt->payload.value.json,
+			OIDC_CLAIM_NONCE, &nonce, NULL);
+	if (nonce != NULL) {
+		oidc_error(r,
+				"rejecting logout request/token since it contains a \"%s\" claim",
+				OIDC_CLAIM_NONCE);
+		goto out;
+	}
+
+	char *jti = NULL;
+	oidc_json_object_get_string(r->pool, jwt->payload.value.json,
+			OIDC_CLAIM_JTI, &jti, NULL);
+	if (jti != NULL) {
+		char *replay = NULL;
+		oidc_cache_get_jti(r, jti, &replay);
+		if (replay != NULL) {
+			oidc_error(r,
+					"the \"%s\" value (%s) passed in logout token was found in the cache already; possible replay attack!?",
+					OIDC_CLAIM_JTI, jti);
+			goto out;
+		}
+	}
+
+	/* jti cache duration is the configured replay prevention window for token issuance plus 10 seconds for safety */
+	apr_time_t jti_cache_duration = apr_time_from_sec(
+			provider->idtoken_iat_slack * 2 + 10);
+
+	/* store it in the cache for the calculated duration */
+	oidc_cache_set_jti(r, jti, jti, apr_time_now() + jti_cache_duration);
+
+	oidc_json_object_get_string(r->pool, jwt->payload.value.json,
+			OIDC_CLAIM_EVENTS, &sid, NULL);
+
 	// TODO: by-spec we should cater for the fact that "sid" has been provided
 	//       in the id_token returned in the authentication request, but "sub"
 	//       is used in the logout token but that requires a 2nd entry in the
@@ -2715,7 +2767,8 @@ static int oidc_handle_logout_backchannel(request_rec *r, oidc_cfg *cfg) {
 	//       this for logout
 	//       (and probably call us multiple times or the same sub if needed)
 
-	oidc_json_object_get_string(r->pool, jwt->payload.value.json, OIDC_CLAIM_SID, &sid, NULL);
+	oidc_json_object_get_string(r->pool, jwt->payload.value.json,
+			OIDC_CLAIM_SID, &sid, NULL);
 	if (sid == NULL)
 		sid = jwt->payload.sub;
 
@@ -2726,7 +2779,9 @@ static int oidc_handle_logout_backchannel(request_rec *r, oidc_cfg *cfg) {
 
 	oidc_cache_get_sid(r, sid, &uuid);
 	if (uuid == NULL) {
-		oidc_error(r, "could not find session based on sid/sub provided in logout token: %s", sid);
+		oidc_error(r,
+				"could not find session based on sid/sub provided in logout token: %s",
+				sid);
 		goto out;
 	}
 
@@ -2748,7 +2803,8 @@ out:
 		jwt = NULL;
 	}
 
-	return oidc_util_http_send(r, response, strlen(response), OIDC_CONTENT_TYPE_JSON, rc);
+	return oidc_util_http_send(r, response, strlen(response),
+			OIDC_CONTENT_TYPE_JSON, rc);
 }
 
 /*
