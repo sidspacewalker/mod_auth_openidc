@@ -2646,7 +2646,6 @@ static int oidc_handle_logout_backchannel(request_rec *r, oidc_cfg *cfg) {
 
 	oidc_debug(r, "enter");
 
-	const char *response = "";
 	const char *logout_token = NULL;
 	oidc_jwt_t *jwt = NULL;
 	oidc_jose_error_t err;
@@ -2815,8 +2814,7 @@ out:
 		jwt = NULL;
 	}
 
-	return oidc_util_http_send(r, response, strlen(response),
-			OIDC_CONTENT_TYPE_JSON, rc);
+	return rc;
 }
 
 /*
