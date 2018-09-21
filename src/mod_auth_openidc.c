@@ -1780,6 +1780,15 @@ static apr_byte_t oidc_save_in_session(request_rec *r, oidc_cfg *c,
 	oidc_session_set_cookie_domain(r, session,
 			c->cookie_domain ? c->cookie_domain : oidc_get_current_url_host(r));
 
+	char *sid = NULL;
+	if (provider->end_session_endpoint != NULL) {
+		oidc_jose_get_string(r->pool, id_token_jwt->payload.value.json, OIDC_CLAIM_SID, FALSE, &sid, NULL);
+		if (sid != NULL)
+			session->sid = apr_pstrdup(r->pool, sid);
+		else
+			session->sid = apr_pstrdup(r->pool, id_token_jwt->payload.sub);
+	}
+
 	/* store the session */
 	return oidc_session_save(r, session, TRUE);
 }
@@ -2566,6 +2575,12 @@ static apr_byte_t oidc_is_front_channel_logout(const char *logout_param_value) {
 							OIDC_IMG_STYLE_LOGOUT_PARAM_VALUE) == 0)));
 }
 
+static apr_byte_t oidc_is_back_channel_logout(const char *logout_param_value) {
+	return ((logout_param_value != NULL)
+			&& (apr_strnatcmp(logout_param_value,
+					OIDC_BACKCHANNEL_STYLE_LOGOUT_PARAM_VALUE) == 0));
+}
+
 /*
  * handle a local logout
  */
@@ -2619,6 +2634,124 @@ static int oidc_handle_logout_request(request_rec *r, oidc_cfg *c,
 }
 
 /*
+ * handle a backchannel logout
+ */
+static int oidc_handle_logout_backchannel(request_rec *r, oidc_cfg *cfg) {
+
+	oidc_debug(r, "enter");
+
+	const char *response = "";
+	const char *logout_token = NULL;
+	oidc_jwt_t *jwt = NULL;
+	oidc_jose_error_t err;
+	oidc_jwk_t *jwk = NULL;
+	oidc_provider_t *provider = NULL;
+	char *sid = NULL, *uuid = NULL;
+	int rc = HTTP_BAD_REQUEST;
+
+	apr_table_t *params = apr_table_make(r->pool, 8);
+	if (oidc_util_read_post_params(r, params) == FALSE) {
+		oidc_error(r, "could not read POST-ed parameters to the logout endpoint");
+		goto out;
+	}
+
+	logout_token = apr_table_get(params, OIDC_PROTO_LOGOUT_TOKEN);
+	if (logout_token == NULL) {
+		oidc_error(r, "backchannel lggout endpoint was called but could not find a parameter named \"%s\"", OIDC_PROTO_LOGOUT_TOKEN);
+		goto out;
+	}
+
+	// TODO: jwk symmetric key based on provider
+	// TODO: share more code with regular id_token validation and unsolicited state
+
+	if (oidc_jwt_parse(r->pool, logout_token, &jwt,
+			oidc_util_merge_symmetric_key(r->pool, cfg->private_keys, NULL),
+			&err) == FALSE) {
+		oidc_error(r, "oidc_jwt_parse failed: %s", oidc_jose_e2s(r->pool, err));
+		goto out;
+	}
+
+	provider = oidc_get_provider_for_issuer(r, cfg,
+			jwt->payload.iss, FALSE);
+	if (provider == NULL) {
+		oidc_error(r, "no provider found for issuer: %s", jwt->payload.iss);
+		goto out;
+	}
+
+	// TODO: destroy the JWK used for decryption
+
+	jwk = NULL;
+	if (oidc_util_create_symmetric_key(r, provider->client_secret, 0,
+			NULL, TRUE, &jwk) == FALSE)
+		return FALSE;
+
+	oidc_jwks_uri_t jwks_uri = { provider->jwks_uri,
+			provider->jwks_refresh_interval, provider->ssl_validate_server };
+	if (oidc_proto_jwt_verify(r, cfg, jwt, &jwks_uri,
+			oidc_util_merge_symmetric_key(r->pool, NULL, jwk)) == FALSE) {
+
+		oidc_error(r,
+				"id_token signature could not be validated, aborting");
+		goto out;
+	}
+
+	// oidc_proto_validate_idtoken would try and require a token binding cnf
+	// if the policy is set to "required", so don't use that here
+
+	if (oidc_proto_validate_jwt(r, jwt, provider->issuer, FALSE, FALSE,
+			provider->idtoken_iat_slack) == FALSE)
+		goto out;
+
+	/* verify the "aud" and "azp" values */
+	if (oidc_proto_validate_aud_and_azp(r, cfg, provider,
+			&jwt->payload) == FALSE)
+		goto out;
+
+	// TODO: by-spec we should cater for the fact that "sid" has been provided
+	//       in the id_token returned in the authentication request, but "sub"
+	//       is used in the logout token but that requires a 2nd entry in the
+	//       cache and a separate session "sub" member, ugh; we'll just assume
+	//       that is "sid" is specified in the id_token, the OP will actually use
+	//       this for logout
+	//       (and probably call us multiple times or the same sub if needed)
+
+	oidc_json_object_get_string(r->pool, jwt->payload.value.json, OIDC_CLAIM_SID, &sid, NULL);
+	if (sid == NULL)
+		sid = jwt->payload.sub;
+
+	if (sid == NULL) {
+		oidc_error(r, "no \"sub\" and no \"sid\" claim found in logout token");
+		goto out;
+	}
+
+	oidc_cache_get_sid(r, sid, &uuid);
+	if (uuid == NULL) {
+		oidc_error(r, "could not find session based on sid/sub provided in logout token: %s", sid);
+		goto out;
+	}
+
+	// clear the session cache
+	oidc_cache_set_sid(r, sid, NULL, 0);
+	oidc_cache_set_session(r, uuid, NULL, 0);
+
+	rc = DONE;
+
+out:
+
+	if (jwk != NULL) {
+		oidc_jwk_destroy(jwk);
+		jwk = NULL;
+
+	}
+	if (jwt != NULL) {
+		oidc_jwt_destroy(jwt);
+		jwt = NULL;
+	}
+
+	return oidc_util_http_send(r, response, strlen(response), OIDC_CONTENT_TYPE_JSON, rc);
+}
+
+/*
  * perform (single) logout
  */
 static int oidc_handle_logout(request_rec *r, oidc_cfg *c,
@@ -2632,6 +2765,8 @@ static int oidc_handle_logout(request_rec *r, oidc_cfg *c,
 
 	if (oidc_is_front_channel_logout(url)) {
 		return oidc_handle_logout_request(r, c, session, url);
+	} else if (oidc_is_back_channel_logout(url)) {
+		return oidc_handle_logout_backchannel(r, c);
 	}
 
 	if ((url == NULL) || (apr_strnatcmp(url, "") == 0)) {

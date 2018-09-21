@@ -1,3 +1,6 @@
+09/21/2018
+- support backchannel logout according to: https://openid.net/specs/openid-connect-backchannel-1_0.html
+
 09/16/2018
 - support nested arrays in Require claim authorization evaluation; see #392; thanks @hpbieker
 - bump to 2.3.9rc0
