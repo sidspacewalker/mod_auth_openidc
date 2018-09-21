@@ -3420,6 +3420,19 @@ int oidc_handle_redirect_uri_request(request_rec *r, oidc_cfg *c,
 
 		/* this is an authorization response from the OP using the Basic Client profile or a Hybrid flow*/
 		return oidc_handle_redirect_authorization_response(r, c, session);
+	/*
+	 *
+	 * Note that we are checking for logout *before* checking for a POST authorization response
+	 * to handle backchannel POST-based logout
+	 *
+	 * so any POST to the Redirect URI that does not have a logout query parameter will be handled
+	 * as an authorization response; alternatively we could assume that a POST response has no
+	 * parameters
+	 */
+	} else if (oidc_util_request_has_parameter(r,
+			OIDC_REDIRECT_URI_REQUEST_LOGOUT)) {
+		/* handle logout */
+		return oidc_handle_logout(r, c, session);
 
 	} else if (oidc_proto_is_post_authorization_response(r, c)) {
 
@@ -3430,12 +3443,6 @@ int oidc_handle_redirect_uri_request(request_rec *r, oidc_cfg *c,
 
 		/* this is response from the OP discovery page */
 		return oidc_handle_discovery_response(r, c);
-
-	} else if (oidc_util_request_has_parameter(r,
-			OIDC_REDIRECT_URI_REQUEST_LOGOUT)) {
-
-		/* handle logout */
-		return oidc_handle_logout(r, c, session);
 
 	} else if (oidc_util_request_has_parameter(r,
 			OIDC_REDIRECT_URI_REQUEST_JWKS)) {
