@@ -1686,6 +1686,11 @@ static apr_byte_t oidc_set_request_user(request_rec *r, oidc_cfg *c,
 	return TRUE;
 }
 
+static char *oidc_make_sid_iss_unique(request_rec *r, const char *sid,
+		const char *issuer) {
+	return apr_psprintf(r->pool, "%s@%s", sid, issuer);
+}
+
 /*
  * store resolved information in the session
  */
@@ -1784,10 +1789,9 @@ static apr_byte_t oidc_save_in_session(request_rec *r, oidc_cfg *c,
 	if (provider->end_session_endpoint != NULL) {
 		oidc_jose_get_string(r->pool, id_token_jwt->payload.value.json,
 				OIDC_CLAIM_SID, FALSE, &sid, NULL);
-		if (sid != NULL)
-			session->sid = apr_pstrdup(r->pool, sid);
-		else
-			session->sid = apr_pstrdup(r->pool, id_token_jwt->payload.sub);
+		if (sid == NULL)
+			sid = id_token_jwt->payload.sub;
+		session->sid = oidc_make_sid_iss_unique(r, sid, provider->issuer);
 	}
 
 	/* store the session */
@@ -2777,6 +2781,14 @@ static int oidc_handle_logout_backchannel(request_rec *r, oidc_cfg *cfg) {
 		goto out;
 	}
 
+	// TODO: when dealing with sub instead of a true sid, we'll be killing all sessions for
+	//       a specific user, across hosts that share the *same* cache backend
+	//       if those hosts haven't been configured with a different OIDCCryptoPassphrase
+	//       - perhaps that's even acceptable since non-memory caching is encrypted by default
+	//         and memory-based caching doesn't suffer from this (different shm segments)?
+	//       - it will result in 400 errors returned from backchannel logout calls to the other hosts...
+
+	sid = oidc_make_sid_iss_unique(r, sid, provider->issuer);
 	oidc_cache_get_sid(r, sid, &uuid);
 	if (uuid == NULL) {
 		oidc_error(r,
